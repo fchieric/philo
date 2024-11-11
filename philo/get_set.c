@@ -6,89 +6,42 @@
 /*   By: fabi <fabi@student.42.fr>                  +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2024/11/02 18:53:46 by fabi              #+#    #+#             */
-/*   Updated: 2024/11/11 10:15:33 by fabi             ###   ########.fr       */
+/*   Updated: 2024/11/11 12:23:14 by fabi             ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
 #include "philo.h"
 
-void    set_int(pthread_mutex_t *mutex, int *value, int new_value)
+void	set_bool(pthread_mutex_t *mutex, bool *var, bool value)
 {
-    pthread_mutex_lock(mutex);
-    *value = new_value;
-    pthread_mutex_unlock(mutex);
+	pthread_mutex_lock(mutex);
+	*var = value;
+	pthread_mutex_unlock(mutex);
 }
 
-int get_int(pthread_mutex_t *mutex, int *value)
+bool	get_bool(pthread_mutex_t *mutex, bool *var)
 {
-    int ret;
+	bool	value;
 
-    pthread_mutex_lock(mutex);
-    ret = *value;
-    pthread_mutex_unlock(mutex);
-    return (ret);
+	pthread_mutex_lock(mutex);
+	value = *var;
+	pthread_mutex_unlock(mutex);
+	return (value);
 }
 
-void    set_ulong(pthread_mutex_t *mutex, unsigned long *value,
-        unsigned long new_value)
+void	set_simulation_state(t_table *table, t_simulation_state new_state)
 {
-    pthread_mutex_lock(mutex);
-    *value = new_value;
-    pthread_mutex_unlock(mutex);
+	safe_mutex(LOCK, &table->table_lock);
+	table->sim_state = new_state;
+	safe_mutex(UNLOCK, &table->table_lock);
 }
 
-unsigned long get_ulong(pthread_mutex_t *mutex, unsigned long *value)
+t_simulation_state	get_simulation_state(t_table *table)
 {
-    unsigned long ret;
+	t_simulation_state	state;
 
-    pthread_mutex_lock(mutex);
-    ret = *value;
-    pthread_mutex_unlock(mutex);
-    return (ret);
-}
-
-// Incrementa un intero in modo sicuro utilizzando un mutex (mutex_intincr)
-int safe_intplus(pthread_mutex_t *mutex, int *value)
-{
-    int ret;
-
-    pthread_mutex_lock(mutex);
-    *value += 1;
-    ret = *value;
-    pthread_mutex_unlock(mutex);
-    return (ret);
-}
-
-void    set_bool(pthread_mutex_t *mutex, bool *var, bool value)
-{
-    pthread_mutex_lock(mutex);
-    *var = value;
-    pthread_mutex_unlock(mutex);
-}
-
-bool    get_bool(pthread_mutex_t *mutex, bool *var)
-{
-    bool value;
-
-    pthread_mutex_lock(mutex);
-    value = *var;
-    pthread_mutex_unlock(mutex);
-    return (value);
-}
-
-void set_simulation_state(t_table *table, t_simulation_state new_state)
-{
-    safe_mutex(LOCK, &table->table_lock);
-    table->sim_state = new_state;
-    safe_mutex(UNLOCK, &table->table_lock);
-}
-
-t_simulation_state get_simulation_state(t_table *table)
-{
-    t_simulation_state state;
-    
-    safe_mutex(LOCK, &table->table_lock);
-    state = table->sim_state;
-    safe_mutex(UNLOCK, &table->table_lock);
-    return state;
+	safe_mutex(LOCK, &table->table_lock);
+	state = table->sim_state;
+	safe_mutex(UNLOCK, &table->table_lock);
+	return (state);
 }
