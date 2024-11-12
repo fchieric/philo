@@ -1,0 +1,543 @@
+
+static void	take_forks(t_philo *philo)
+{
+	if (get_bool(&philo->table->table_lock, &philo->table->end))
+		return ;
+	safe_mutex(LOCK, philo->r_fork);
+	if (get_bool(&philo->table->table_lock, &philo->table->end))
+	{
+		safe_mutex(UNLOCK, philo->r_fork);
+		return ;
+	}
+	print_status(philo, TAKE_FORK);
+	safe_mutex(LOCK, philo->l_fork);
+	if (get_bool(&philo->table->table_lock, &philo->table->end))
+	{
+		safe_mutex(UNLOCK, philo->l_fork);
+		safe_mutex(UNLOCK, philo->r_fork);
+		return ;
+	}
+	print_status(philo, TAKE_FORK);
+}
+
+static void	eating(t_philo *philo)
+{
+	take_forks(philo);
+	if (get_bool(&philo->table->table_lock, &philo->table->end))
+		return ;
+	safe_mutex(LOCK, &philo->philo_lock);
+	philo->eating = 1;
+	philo->time_to_die = get_time();
+	philo->eat_count++;
+	print_status(philo, EAT);
+	safe_mutex(UNLOCK, &philo->philo_lock);
+	usleep(philo->table->time_to_eat * 1000);
+	safe_mutex(LOCK, &philo->philo_lock);
+	philo->eating = 0;
+	safe_mutex(UNLOCK, &philo->philo_lock);
+	safe_mutex(UNLOCK, philo->l_fork);
+	safe_mutex(UNLOCK, philo->r_fork);
+}
+
+void	philo_routine_loop(t_philo *philo)
+{
+	while (!philo->table->dead && !philo->table->end)
+	{
+		eating(philo);
+		safe_mutex(LOCK, &philo->table->table_lock);
+		if (philo->table->max_meals != -1
+			&& philo->eat_count >= philo->table->max_meals)
+		{
+			safe_mutex(UNLOCK, &philo->table->table_lock);
+			break ;
+		}
+		safe_mutex(UNLOCK, &philo->table->table_lock);
+		print_status(philo, SLEEP);
+		usleep(philo->table->time_to_sleep * 1000);
+		print_status(philo, THINK);
+	}
+}
+
+void	*philo_routine(void *arg)
+{
+	t_philo		*philo;
+	pthread_t	supervisor_thread;
+
+	philo = (t_philo *)arg;
+	safe_thread(&supervisor_thread, supervisor, philo, CREATE);
+	safe_thread(&supervisor_thread, NULL, NULL, DETACH);
+	if (philo->table->n_philo == 1)
+	{
+		safe_mutex(LOCK, philo->r_fork);
+		print_status(philo, TAKE_FORK);
+		usleep(philo->table->time_to_die * 1000);
+		safe_mutex(UNLOCK, philo->r_fork);
+		return (NULL);
+	}
+	if (philo->id % 2 == 0)
+		usleep(1000);
+	philo_routine_loop(philo);
+	return (NULL);
+}
+
+int	start_simulation(t_table *table)
+{
+	int			i;
+	pthread_t	monitor;
+
+	table->start_time = get_time();
+	if (table->n_philo > 1 && table->max_meals != -1)
+	{
+		safe_thread(&monitor, meals_monitor, table, CREATE);
+		safe_thread(&monitor, NULL, NULL, DETACH);
+	}
+	i = 0;
+	while (i < table->n_philo)
+	{
+		if (safe_thread(&table->tid[i], philo_routine,
+				&table->philos[i], CREATE) != 0)
+		{
+			table->end = 1;
+			return (1);
+		}
+		i++;
+	}
+	return (0);
+}
+
+
+void	cleanup_table(t_table *table)
+{
+	int	i;
+
+	i = 0;
+	while (i < table->n_philo)
+	{
+		safe_thread(&table->tid[i], NULL, NULL, JOIN);
+		i++;
+	}
+	usleep(1000);
+	i = 0;
+	while (i < table->n_philo)
+	{
+		safe_mutex(DESTROY, &table->forks[i]);
+		safe_mutex(DESTROY, &table->philos[i].philo_lock);
+		i++;
+	}
+	safe_mutex(DESTROY, &table->table_lock);
+	safe_mutex(DESTROY, &table->write_lock);
+	if (table->tid)
+		free(table->tid);
+	if (table->philos)
+		free(table->philos);
+	if (table->forks)
+		free(table->forks);
+}
+
+
+void	check_philos_meals(t_table *table, int *all_finished)
+{
+	int	i;
+
+	i = 0;
+	while (i < table->n_philo && table->max_meals != -1)
+	{
+		safe_mutex(LOCK, &table->philos[i].philo_lock);
+		if (table->philos[i].eat_count < table->max_meals)
+		{
+			*all_finished = 0;
+			safe_mutex(UNLOCK, &table->philos[i].philo_lock);
+			break ;
+		}
+		safe_mutex(UNLOCK, &table->philos[i].philo_lock);
+		i++;
+	}
+	if (i == table->n_philo && *all_finished
+		&& table->max_meals != -1 && !table->end)
+	{
+		table->end = 1;
+		safe_mutex(LOCK, &table->write_lock);
+		printf("%lu %s\n", get_time() - table->start_time, ALL_FINISHED_MSG);
+		print_meals_status(table);
+		safe_mutex(UNLOCK, &table->write_lock);
+	}
+	safe_mutex(UNLOCK, &table->table_lock);
+}
+
+void	*meals_monitor(void *arg)
+{
+	t_table	*table;
+	int		all_finished;
+
+	table = (t_table *)arg;
+	while (!table->dead && !table->end)
+	{
+		all_finished = 1;
+		safe_mutex(LOCK, &table->table_lock);
+		check_philos_meals(table, &all_finished);
+		if (!all_finished && !table->end)
+			usleep(1000);
+	}
+	return (NULL);
+}
+
+void	*supervisor(void *arg)
+{
+	t_philo		*philo;
+	uint64_t	current_time;
+
+	philo = (t_philo *)arg;
+	while (!philo->table->dead && !philo->table->end)
+	{
+		safe_mutex(LOCK, &philo->philo_lock);
+		current_time = get_time();
+		if (!philo->eating
+			&& (current_time - philo->time_to_die > philo->table->time_to_die))
+		{
+			print_status(philo, DIE);
+			safe_mutex(LOCK, &philo->table->table_lock);
+			philo->table->dead = 1;
+			safe_mutex(UNLOCK, &philo->table->table_lock);
+			safe_mutex(UNLOCK, &philo->philo_lock);
+			break ;
+		}
+		safe_mutex(UNLOCK, &philo->philo_lock);
+		usleep(1000);
+	}
+	return (NULL);
+}
+
+
+void	set_bool(pthread_mutex_t *mutex, bool *var, bool value)
+{
+	pthread_mutex_lock(mutex);
+	*var = value;
+	pthread_mutex_unlock(mutex);
+}
+
+bool	get_bool(pthread_mutex_t *mutex, bool *var)
+{
+	bool	value;
+
+	pthread_mutex_lock(mutex);
+	value = *var;
+	pthread_mutex_unlock(mutex);
+	return (value);
+}
+
+void	set_simulation_state(t_table *table, t_simulation_state new_state)
+{
+	safe_mutex(LOCK, &table->table_lock);
+	table->sim_state = new_state;
+	safe_mutex(UNLOCK, &table->table_lock);
+}
+
+t_simulation_state	get_simulation_state(t_table *table)
+{
+	t_simulation_state	state;
+
+	safe_mutex(LOCK, &table->table_lock);
+	state = table->sim_state;
+	safe_mutex(UNLOCK, &table->table_lock);
+	return (state);
+}
+
+
+static void	init_philos(t_table *table)
+{
+	int	i;
+
+	i = 0;
+	while (i < table->n_philo)
+	{
+		table->philos[i].id = i + 1;
+		table->philos[i].table = table;
+		table->philos[i].eat_count = 0;
+		table->philos[i].status = 0;
+		table->philos[i].eating = 0;
+		table->philos[i].time_to_die = get_time();
+		safe_mutex(INIT, &table->philos[i].philo_lock);
+		table->philos[i].r_fork = &table->forks[i];
+		table->philos[i].l_fork = &table->forks[(i + 1) % table->n_philo];
+		i++;
+	}
+}
+
+static void	init_forks(t_table *table)
+{
+	int	i;
+
+	i = 0;
+	while (i < table->n_philo)
+	{
+		safe_mutex(INIT, &table->forks[i]);
+		i++;
+	}
+}
+
+void	init_table(t_table *table)
+{
+	table->tid = safe_malloc(sizeof(pthread_t) * table->n_philo);
+	table->philos = safe_malloc(sizeof(t_philo) * table->n_philo);
+	table->forks = safe_malloc(sizeof(pthread_mutex_t) * table->n_philo);
+	safe_mutex(INIT, &table->table_lock);
+	safe_mutex(INIT, &table->write_lock);
+	table->dead = 0;
+	table->end = 0;
+	table->start_time = 0;
+	init_forks(table);
+	init_philos(table);
+}
+
+void	input_check(t_table *table)
+{
+	if (table->n_philo > MAX_PHILO)
+	{
+		error_exit(WRONG_ARGV);
+	}
+	if ((table->time_to_die < 60 || table->time_to_die > INT_MAX)
+		|| (table->time_to_eat < 60 || table->time_to_eat > INT_MAX)
+		|| (table->time_to_sleep < 60 || table->time_to_sleep > INT_MAX))
+	{
+		error_exit(WRONG_TIME);
+	}
+	if (table->max_meals >= INT_MAX || (table->max_meals == 0
+			|| table->max_meals < -1))
+	{
+		if (table->max_meals == INT_MAX)
+			error_exit(MAX);
+		else
+			error_exit(NEGATIVE);
+	}
+}
+
+void	input_init(t_table *table, int argc, char **argv)
+{
+	table->n_philo = ft_atoi(argv[1]);
+	table->time_to_die = ft_atoi(argv[2]);
+	table->time_to_eat = ft_atoi(argv[3]);
+	table->time_to_sleep = ft_atoi(argv[4]);
+	if (argc == 6)
+		table->max_meals = ft_atoi(argv[5]);
+	else
+		table->max_meals = -1;
+	input_check(table);
+	init_table(table);
+}
+
+
+int	main(int argc, char **argv)
+{
+	t_table	table;
+
+	if (argc < 5 || argc > 6)
+		error_exit("Error: Invalid number of arguments\n");
+	input_init(&table, argc, argv);
+	if (start_simulation(&table) != 0)
+	{
+		cleanup_table(&table);
+		error_exit("Error: Failed to start simulation\n");
+	}
+	cleanup_table(&table);
+	return (0);
+}
+
+
+int	is_valid_digit(char c)
+{
+	if (c >= '0' && c <= '9')
+		return (1);
+	return (0);
+}
+
+int	parse_number(const char *str, int *i, int *found_digit)
+{
+	int	res;
+
+	res = 0;
+	*found_digit = 0;
+	while (str[*i] && (is_valid_digit(str[*i]) || str[*i] == ' '))
+	{
+		if (is_valid_digit(str[*i]))
+		{
+			if (res > INT_MAX / 10 || (res == INT_MAX / 10
+					&& (str[*i] - '0') > INT_MAX % 10))
+			{
+				error_exit(MAX);
+			}
+			res = res * 10 + (str[*i] - '0');
+			*found_digit = 1;
+		}
+		(*i)++;
+	}
+	return (res);
+}
+
+int	ft_atoi(const char *str)
+{
+	int		i;
+	int		found_digit;
+	int		res;
+
+	i = 0;
+	while (str[i] == ' ' || (str[i] >= 9 && str[i] <= 13))
+		i++;
+	if (str[i] == '-' || str[i] == '+')
+	{
+		if (str[i] == '-')
+			error_exit(NEGATIVE);
+		i++;
+	}
+	res = parse_number(str, &i, &found_digit);
+	if (!found_digit)
+		error_exit(NAN);
+	if (str[i] != '\0')
+		error_exit(WRONG_ARGV);
+	return (res);
+}
+
+
+void	*safe_malloc(size_t size)
+{
+	void	*ret;
+
+	ret = malloc(size);
+	if (ret == NULL)
+	{
+		error_exit("Error: Malloc failed :(\n");
+	}
+	return (ret);
+}
+
+void	mutex_error(int status, t_opcode opcode)
+{
+	if (status == 0)
+		return ;
+	if (status == EINVAL)
+	{
+		if (opcode == INIT)
+			error_exit("Error: Invalid attribute value :(\n");
+		else
+			error_exit("Error: Invalid mutex value :(\n");
+	}
+	else if (status == EDEADLK)
+		error_exit("Error: A deadlock condition was detected :(\n");
+	else if (status == EAGAIN)
+		error_exit("Error: Max number of recursive locks exceeded :(\n");
+	else if (status == ENOMEM)
+		error_exit("Error: Insufficient memory for mutex initialization :(\n");
+	else if (status == EBUSY)
+		error_exit("Error: The mutex is already locked :(\n");
+	else if (status == EPERM)
+		error_exit("Error: Current thread doesn't hold a lock on mutex :(\n");
+	else
+		error_exit("Error: Mutex operation failed :(\n");
+}
+
+int	safe_mutex(t_opcode opcode, pthread_mutex_t *mutex)
+{
+	int	status;
+
+	status = 0;
+	if (opcode == LOCK)
+		status = pthread_mutex_lock(mutex);
+	else if (opcode == UNLOCK)
+		status = pthread_mutex_unlock(mutex);
+	else if (opcode == INIT)
+		status = pthread_mutex_init(mutex, NULL);
+	else if (opcode == DESTROY)
+		status = pthread_mutex_destroy(mutex);
+	else
+		error_exit("Error: Invalid opcode :(\n");
+	mutex_error(status, opcode);
+	return (status);
+}
+
+static void	thread_error(int status, t_opcode op)
+{
+	if (status == 0)
+		return ;
+	if (status == EINVAL)
+	{
+		if (op == JOIN || op == DETACH)
+			error_exit("Error: Invalid thread or is not joinable :(\n");
+		else
+			error_exit("Error: Invalid thread attributes :(\n");
+	}
+	else if (status == EPERM)
+		error_exit("Error: No permission to join or detach the thread :(\n");
+	else if (status == ESRCH)
+		error_exit("Error: No thread with the ID could be found :(\n");
+	else if (status == EDEADLK)
+		error_exit("Error: A deadlock was detected :(\n");
+	else
+		error_exit("Error: Thread operation failed :(\n");
+}
+
+int	safe_thread(pthread_t *thread, void *(*func)(void *),
+	void *arg, t_opcode op)
+{
+	int	status;
+
+	status = 0;
+	if (op == CREATE)
+		status = pthread_create(thread, NULL, func, arg);
+	else if (op == JOIN)
+		status = pthread_join(*thread, NULL);
+	else if (op == DETACH)
+		status = pthread_detach(*thread);
+	else
+		error_exit("Error: Invalid thread operation :(\n");
+	thread_error(status, op);
+	return (status);
+}
+
+
+void	error_exit(char *message)
+{
+	printf("%s\n", message);
+	exit(1);
+}
+
+uint64_t	get_time(void)
+{
+	struct timeval	tv;
+
+	if (gettimeofday(&tv, NULL) != 0)
+	{
+		perror("gettimeofday failed");
+		return (-1);
+	}
+	return ((tv.tv_sec * (uint64_t)1000) + (tv.tv_usec / 1000));
+}
+
+void	print_meals_status(t_table *table)
+{
+	int	i;
+
+	i = 0;
+	printf("\nMeals status:\n");
+	while (i < table->n_philo)
+	{
+		safe_mutex(LOCK, &table->philos[i].philo_lock);
+		printf("Philosopher %d has eaten %d meals\n",
+			table->philos[i].id,
+			table->philos[i].eat_count);
+		safe_mutex(UNLOCK, &table->philos[i].philo_lock);
+		i++;
+	}
+	printf("\n");
+}
+
+void	print_status(t_philo *philo, char *msg)
+{
+	uint64_t	current_time;
+
+	safe_mutex(LOCK, &philo->table->write_lock);
+	if (!philo->table->dead && !philo->table->end)
+	{
+		current_time = get_time() - philo->table->start_time;
+		printf("%lu %d %s", current_time, philo->id, msg);
+	}
+	safe_mutex(UNLOCK, &philo->table->write_lock);
+}
